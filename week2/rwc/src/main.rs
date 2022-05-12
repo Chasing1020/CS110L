@@ -1,4 +1,6 @@
-use std::env;
+use std::{env, io};
+use std::io::BufRead; 
+use std::fs::File;
 use std::process;
 
 fn main() {
@@ -8,5 +10,6 @@ fn main() {
         process::exit(1);
     }
     let filename = &args[1];
-    // Your code here :)
+    let file = File::open(filename).unwrap();
+    println!("{}", io::BufReader::new(file).lines().count());
 }

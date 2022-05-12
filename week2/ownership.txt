@@ -5,7 +5,7 @@ fn main() {
     let ref1 = &s;
     let ref2 = &ref1;
     let ref3 = &ref2;
-    s = String::from("goodbye");
+    s = String::from("goodbye"); // has borrowed
     println!("{}", ref3.to_uppercase());
 }
 ```
@@ -16,7 +16,7 @@ Example 2:
 ```
 fn drip_drop() -> &String {
     let s = String::from("hello world!");
-    return &s;
+    return &s; // missing lifetime
 }
 ```
 
@@ -28,7 +28,7 @@ fn main() {
     let s1 = String::from("hello");
     let mut v = Vec::new();
     v.push(s1);
-    let s2: String = v[0];
+    let s2: String = v[0]; // String doesn't implement the Copy trait
     println!("{}", s2);
 }
 ```
