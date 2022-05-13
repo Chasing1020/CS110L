@@ -281,7 +281,7 @@ async fn test_rate_limiting() {
                 the connection outright.",
             );
         log::info!("{:?}", response);
-        log::info!("Checking to make sure the server responded with HTTP 429");
+        log::info!("Checking to make sure the server responded with HTTP 429, times: {}", i);
         assert_eq!(response.status().as_u16(), 429);
     }
 

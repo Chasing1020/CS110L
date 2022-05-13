@@ -3,14 +3,15 @@ mod response;
 
 use clap::Parser;
 use rand::{Rng, SeedableRng};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 // use std::sync::{mpsc::channel, Arc};
 // use threadpool::ThreadPool;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::delay_for;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
@@ -64,7 +65,9 @@ struct ProxyState {
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
     /// Upstream status, id -> true/false
-    upstream_status: RwLock<HashSet<usize>>,
+    available_addresses: RwLock<HashSet<usize>>,
+    /// request_count
+    request_count: Mutex<HashMap<IpAddr, usize>>,
 }
 
 #[tokio::main]
@@ -94,15 +97,16 @@ async fn main() {
     };
     log::info!("Listening for requests on {}", options.bind);
 
-    let mut upstream_status: HashSet<usize> = (0..options.upstream.len()).collect();
-
+    let available_addresses: HashSet<usize> = (0..options.upstream.len()).collect();
+    let request_count = Mutex::new(HashMap::new());
     // Handle incoming connections
     let state = ProxyState {
         upstream_addresses: options.upstream,
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
-        upstream_status: RwLock::new(upstream_status),
+        available_addresses: RwLock::new(available_addresses),
+        request_count,
     };
 
     // // finish Milestone 1: Add multithreading
@@ -124,15 +128,39 @@ async fn main() {
         start_health_check(&health_check_state).await;
     });
 
+    if shared_state.max_requests_per_minute > 0 {
+        let request_count_state = shared_state.clone();
+        tokio::spawn(async move {
+            refresh_request_count(&request_count_state).await;
+        });
+    }
+
     // finish Milestone 2: Add async
     loop {
         let stream = listener.accept().await;
         match stream {
-            Ok((stream, _)) => {
-                let shared_state_ref = Arc::clone(&shared_state);
-                tokio::spawn(async move {
-                    handle_connection(stream, &shared_state_ref).await;
-                });
+            Ok((mut stream, _)) => {
+                let ip_addr = stream.peer_addr().unwrap().ip();
+                let mut request_count = shared_state.request_count.lock().await;
+                let count = request_count.entry(ip_addr).or_insert(0);
+                *count += 1;
+                println!(
+                    "***count:{}, max:{}***",
+                    count, shared_state.max_requests_per_minute
+                );
+                let max_requests_per_minute = shared_state.max_requests_per_minute;
+                if max_requests_per_minute == 0 || *count <= max_requests_per_minute {
+                    let shared_state_ref = Arc::clone(&shared_state);
+                    tokio::spawn(async move {
+                        handle_connection(stream, &shared_state_ref).await;
+                    });
+                } else {
+                    let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+                    response::write_to_stream(&response, &mut stream)
+                        .await
+                        .unwrap();
+                    continue;
+                }
             }
             Err(_) => {
                 break;
@@ -148,21 +176,21 @@ async fn start_health_check(state: &ProxyState) {
             state.active_health_check_interval as u64,
         ))
         .await;
-        let mut upstream_status_writer = state.upstream_status.write().await;
-        for idx in 0..upstream_status_writer.len() {
+        let mut available_addresses_writer = state.available_addresses.write().await;
+        for idx in 0..state.upstream_addresses.len() {
             let upstream_ip = &state.upstream_addresses[idx];
             let uri = &state.active_health_check_path;
             if check_http_status(uri, upstream_ip).await {
                 // if !TcpStream::connect(upstream_ip).await.is_err() {
-                upstream_status_writer.insert(idx);
+                available_addresses_writer.insert(idx);
             } else {
-                upstream_status_writer.remove(&idx);
+                available_addresses_writer.remove(&idx);
             }
         }
     }
 }
 
-async fn check_http_status(uri: &String, upstream_ip:&String)-> bool {
+async fn check_http_status(uri: &String, upstream_ip: &String) -> bool {
     let mut stream = TcpStream::connect(upstream_ip).await.unwrap();
     let request = http::Request::builder()
         .method(http::Method::GET)
@@ -178,15 +206,23 @@ async fn check_http_status(uri: &String, upstream_ip:&String)-> bool {
     res.status().as_u16() == 200
 }
 
+async fn refresh_request_count(state: &ProxyState) {
+    loop {
+        delay_for(Duration::from_secs(60)).await;
+        let mut request_count = state.request_count.lock().await;
+        request_count.clear();
+    }
+}
+
 async fn pickup_random_alive_upstream(state: &ProxyState) -> Option<usize> {
     let mut rng = rand::rngs::StdRng::from_entropy();
     // get the read lock, release automatically when the function return
-    let upstream_status_reader = state.upstream_status.read().await;
-    if upstream_status_reader.is_empty() {
+    let available_addresses_reader = state.available_addresses.read().await;
+    if available_addresses_reader.is_empty() {
         return None;
     }
-    let random_idx = rng.gen_range(0, upstream_status_reader.len());
-    if let Some(&index) = upstream_status_reader.iter().nth(random_idx) {
+    let random_idx = rng.gen_range(0, available_addresses_reader.len());
+    if let Some(&index) = available_addresses_reader.iter().nth(random_idx) {
         return Some(index);
     }
     None
@@ -196,13 +232,13 @@ async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::E
     // let mut rng = rand::rngs::StdRng::from_entropy();
     loop {
         if let Some(upstream_idx) = pickup_random_alive_upstream(state).await {
-            eprintln!("++++status: {:?} ++++", state.upstream_status.read().await);
+            eprintln!("++++status: {:?} ++++", state.available_addresses.read().await);
             let upstream_ip = &state.upstream_addresses[upstream_idx];
             match TcpStream::connect(upstream_ip).await {
                 Ok(stream) => return Ok(stream),
                 Err(_) => {
-                    let mut upstream_status_writer=state.upstream_status.write().await;
-                    upstream_status_writer.remove(&upstream_idx);
+                    let mut available_addresses_writer = state.available_addresses.write().await;
+                    available_addresses_writer.remove(&upstream_idx);
                 }
             };
         } else {
