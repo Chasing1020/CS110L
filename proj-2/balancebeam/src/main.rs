@@ -1,13 +1,17 @@
 mod request;
 mod response;
 
-use std::sync::Arc;
-
 use clap::Parser;
 use rand::{Rng, SeedableRng};
+use std::collections::HashSet;
+use std::io::ErrorKind;
+use std::sync::Arc;
+use std::time::Duration;
 // use std::sync::{mpsc::channel, Arc};
 // use threadpool::ThreadPool;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
+use tokio::time::delay_for;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -59,6 +63,8 @@ struct ProxyState {
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Vec<String>,
+    /// Upstream status, id -> true/false
+    upstream_status: RwLock<HashSet<usize>>,
 }
 
 #[tokio::main]
@@ -88,12 +94,15 @@ async fn main() {
     };
     log::info!("Listening for requests on {}", options.bind);
 
+    let mut upstream_status: HashSet<usize> = (0..options.upstream.len()).collect();
+
     // Handle incoming connections
     let state = ProxyState {
         upstream_addresses: options.upstream,
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
+        upstream_status: RwLock::new(upstream_status),
     };
 
     // // finish Milestone 1: Add multithreading
@@ -107,8 +116,15 @@ async fn main() {
     //         pool.execute(move || handle_connection(stream, &state_copy));
     //     }
     // }
+
     let shared_state = Arc::new(state);
 
+    let health_check_state = shared_state.clone();
+    tokio::spawn(async move {
+        start_health_check(&health_check_state).await;
+    });
+
+    // finish Milestone 2: Add async
     loop {
         let stream = listener.accept().await;
         match stream {
@@ -126,15 +142,76 @@ async fn main() {
     log::error!("Connection closed");
 }
 
-async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
+async fn start_health_check(state: &ProxyState) {
+    loop {
+        delay_for(Duration::from_secs(
+            state.active_health_check_interval as u64,
+        ))
+        .await;
+        let mut upstream_status_writer = state.upstream_status.write().await;
+        for idx in 0..upstream_status_writer.len() {
+            let upstream_ip = &state.upstream_addresses[idx];
+            let uri = &state.active_health_check_path;
+            if check_http_status(uri, upstream_ip).await {
+                // if !TcpStream::connect(upstream_ip).await.is_err() {
+                upstream_status_writer.insert(idx);
+            } else {
+                upstream_status_writer.remove(&idx);
+            }
+        }
+    }
+}
+
+async fn check_http_status(uri: &String, upstream_ip:&String)-> bool {
+    let mut stream = TcpStream::connect(upstream_ip).await.unwrap();
+    let request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(uri)
+        .header("Host", upstream_ip)
+        .body(Vec::new())
+        .unwrap();
+    let _ = request::write_to_stream(&request, &mut stream).await.ok();
+    let res = response::read_from_stream(&mut stream, &http::Method::GET)
+        .await
+        .ok()
+        .unwrap();
+    res.status().as_u16() == 200
+}
+
+async fn pickup_random_alive_upstream(state: &ProxyState) -> Option<usize> {
     let mut rng = rand::rngs::StdRng::from_entropy();
-    let upstream_idx = rng.gen_range(0, state.upstream_addresses.len());
-    let upstream_ip = &state.upstream_addresses[upstream_idx];
-    TcpStream::connect(upstream_ip).await.or_else(|err| {
-        log::error!("Failed to connect to upstream {}: {}", upstream_ip, err);
-        Err(err)
-    })
-    // TODO: implement failover (milestone 3)
+    // get the read lock, release automatically when the function return
+    let upstream_status_reader = state.upstream_status.read().await;
+    if upstream_status_reader.is_empty() {
+        return None;
+    }
+    let random_idx = rng.gen_range(0, upstream_status_reader.len());
+    if let Some(&index) = upstream_status_reader.iter().nth(random_idx) {
+        return Some(index);
+    }
+    None
+}
+
+async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
+    // let mut rng = rand::rngs::StdRng::from_entropy();
+    loop {
+        if let Some(upstream_idx) = pickup_random_alive_upstream(state).await {
+            eprintln!("++++status: {:?} ++++", state.upstream_status.read().await);
+            let upstream_ip = &state.upstream_addresses[upstream_idx];
+            match TcpStream::connect(upstream_ip).await {
+                Ok(stream) => return Ok(stream),
+                Err(_) => {
+                    let mut upstream_status_writer=state.upstream_status.write().await;
+                    upstream_status_writer.remove(&upstream_idx);
+                }
+            };
+        } else {
+            return Err(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "All the upstream servers are down!",
+            ));
+        }
+    }
 }
 
 async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>) {
