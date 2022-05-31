@@ -1,5 +1,7 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::Inferior;
+use nix::sys::signal::{signal, SigHandler, Signal};
+use nix::sys::wait::WaitPidFlag;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -32,12 +34,21 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
+                    println!("{:?}", args);
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
+                        let inferior = self.inferior.as_mut().unwrap();
+                        match inferior.continue_run(None).unwrap() {
+                            crate::inferior::Status::Stopped(_, _) => todo!(),
+                            crate::inferior::Status::Exited(code) => {
+                                println!("Child exited (status {})", code)
+                            }
+                            crate::inferior::Status::Signaled(_) => todo!(),
+                        };
                     } else {
                         println!("Error starting subprocess");
                     }
