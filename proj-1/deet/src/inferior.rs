@@ -1,5 +1,6 @@
 use nix::sys::ptrace;
 use nix::sys::signal;
+use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::os::unix::prelude::CommandExt;
@@ -50,6 +51,11 @@ impl Inferior {
         nix::unistd::Pid::from_raw(self.child.id() as i32)
     }
 
+    /// Returns the stop of this [`Inferior`].
+    pub fn stop(&mut self) -> Result<(), std::io::Error> {
+        self.child.kill()
+    }
+
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
     /// after the waitpid call.
     pub fn wait(&self, options: Option<WaitPidFlag>) -> Result<Status, nix::Error> {
@@ -70,6 +76,8 @@ impl Inferior {
         //     Status::Exited(exit_code) => {}
         //     Status::Signaled(signal) => {}
         // }
+        // unsafe { signal(Signal::SIGINT, SigHandler::SigIgn) }.expect("Error disabling SIGINT handling");
+
         let pid = self.pid();
         ptrace::cont(pid, None)?;
         Ok(self.wait(None).unwrap())

@@ -1,7 +1,5 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::Inferior;
-use nix::sys::signal::{signal, SigHandler, Signal};
-use nix::sys::wait::WaitPidFlag;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -34,16 +32,16 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
-                    println!("{:?}", args);
+                    self.kill_inferior_if_exists().unwrap();
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         // Create the inferior
                         self.inferior = Some(inferior);
-                        // TODO (milestone 1): make the inferior run
-                        // You may use self.inferior.as_mut().unwrap() to get a mutable reference
-                        // to the Inferior object
+
                         let inferior = self.inferior.as_mut().unwrap();
                         match inferior.continue_run(None).unwrap() {
-                            crate::inferior::Status::Stopped(_, _) => todo!(),
+                            crate::inferior::Status::Stopped(signal, _) => {
+                                println!("Child stopped (signal {:?})", signal);
+                            }
                             crate::inferior::Status::Exited(code) => {
                                 println!("Child exited (status {})", code)
                             }
@@ -53,11 +51,25 @@ impl Debugger {
                         println!("Error starting subprocess");
                     }
                 }
+                DebuggerCommand::Continue => {
+                    let inferior = self.inferior.as_mut().unwrap();
+                    inferior.continue_run(None).unwrap();
+                }
                 DebuggerCommand::Quit => {
+                    self.kill_inferior_if_exists().unwrap();
                     return;
                 }
             }
         }
+    }
+
+
+    fn kill_inferior_if_exists(&mut self) -> Result<(), std::io::Error> {
+        if let Some(inferior) = self.inferior.as_mut() {
+            println!("Killing running inferior (pid {})", inferior.pid());
+            inferior.stop()?;
+        }
+        Ok(())
     }
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
