@@ -6,6 +6,7 @@ use nix::unistd::Pid;
 use std::os::unix::prelude::CommandExt;
 use std::process::Child;
 use std::process::Command;
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -51,9 +52,35 @@ impl Inferior {
         nix::unistd::Pid::from_raw(self.child.id() as i32)
     }
 
-    /// Returns the stop of this [`Inferior`].
-    pub fn stop(&mut self) -> Result<(), std::io::Error> {
+    /// Try to kill the child and Returns the result of this [`Inferior`].
+    pub fn kill(&mut self) -> Result<(), std::io::Error> {
         self.child.kill()
+    }
+
+    pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        let regs = ptrace::getregs(self.pid()).unwrap();
+        let mut rip = regs.rip as usize;
+        let mut rbp = regs.rbp as usize;
+        loop {
+            let _line = debug_data.get_line_from_addr(rip);
+            let _func = debug_data.get_function_from_addr(rip);
+            match (&_line, &_func) {
+                (None, None) => println!("unknown func (source file not found)"),
+                (Some(line), None) => println!("unknown func ({})", line),
+                (None, Some(func)) => println!("{} (source file not found)", func),
+                (Some(line), Some(func)) => println!("{} ({})", func, line),
+            }
+            if let Some(func) = _func {
+                if func == "main" {
+                    break;
+                }
+            } else {
+                break;
+            }
+            rip = ptrace::read(self.pid(), (rbp + 8) as ptrace::AddressType)? as usize;
+            rbp = ptrace::read(self.pid(), rbp as ptrace::AddressType)? as usize;
+        }
+        Ok(())
     }
 
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
@@ -71,13 +98,6 @@ impl Inferior {
     }
 
     pub fn continue_run(&mut self, signal: Option<signal::Signal>) -> Result<Status, nix::Error> {
-        // match self.wait(None).unwrap() {
-        //     Status::Stopped(_, _) => {}
-        //     Status::Exited(exit_code) => {}
-        //     Status::Signaled(signal) => {}
-        // }
-        // unsafe { signal(Signal::SIGINT, SigHandler::SigIgn) }.expect("Error disabling SIGINT handling");
-
         let pid = self.pid();
         ptrace::cont(pid, None)?;
         Ok(self.wait(None).unwrap())

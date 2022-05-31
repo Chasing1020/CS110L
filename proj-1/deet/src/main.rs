@@ -1,6 +1,8 @@
 mod debugger;
 mod debugger_command;
 mod inferior;
+mod dwarf_data;
+mod gimli_wrapper;
 
 use crate::debugger::Debugger;
 use nix::sys::signal::{signal, SigHandler, Signal};
@@ -8,7 +10,7 @@ use std::env;
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
-    args.push("samples/sleepy_print".to_string());
+    args.push("samples/segfault".to_string());
     if args.len() != 2 {
         println!("Usage: {} <target program>", args[0]);
         std::process::exit(1);

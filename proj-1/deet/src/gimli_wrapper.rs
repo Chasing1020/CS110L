@@ -7,8 +7,9 @@
 
 use gimli;
 use gimli::{UnitOffset, UnitSectionOffset};
-use object::Object;
+use object::{Object, ObjectSection};
 use std::borrow;
+use std::num::NonZeroU64;
 //use std::io::{BufWriter, Write};
 use crate::dwarf_data::{File, Function, Line, Location, Type, Variable};
 use std::collections::HashMap;
@@ -18,17 +19,22 @@ use std::{io, path};
 
 pub fn load_file(object: &object::File, endian: gimli::RunTimeEndian) -> Result<Vec<File>, Error> {
     // Load a section and return as `Cow<[u8]>`.
+    // let load_section = |id: gimli::SectionId| -> Result<borrow::Cow<[u8]>, gimli::Error> {
+    //     Ok(object
+    //         .section_data_by_name(id.name())
+    //         .unwrap_or(borrow::Cow::Borrowed(&[][..])))
+    // };
     let load_section = |id: gimli::SectionId| -> Result<borrow::Cow<[u8]>, gimli::Error> {
-        Ok(object
-            .section_data_by_name(id.name())
-            .unwrap_or(borrow::Cow::Borrowed(&[][..])))
+        match object.section_by_name(id.name()) {
+            Some(ref section) => Ok(section
+                .uncompressed_data()
+                .unwrap_or(borrow::Cow::Borrowed(&[][..]))),
+            None => Ok(borrow::Cow::Borrowed(&[][..])),
+        }
     };
-    // Load a supplementary section. We don't have a supplementary object file,
-    // so always return an empty slice.
-    let load_section_sup = |_| Ok(borrow::Cow::Borrowed(&[][..]));
-
+    
     // Load all of the sections.
-    let dwarf_cow = gimli::Dwarf::load(&load_section, &load_section_sup)?;
+    let dwarf_cow = gimli::Dwarf::load(&load_section)?;
 
     // Borrow a `Cow<[u8]>` to create an `EndianSlice`.
     let borrow_section: &dyn for<'a> Fn(
@@ -227,12 +233,15 @@ pub fn load_file(object: &object::File, endian: gimli::RunTimeEndian) -> Result<
 
                     // Determine line/column. DWARF line/column is never 0, so we use that
                     // but other applications may want to display this differently.
-                    let line = row.line().unwrap_or(0);
+                    let line = match row.line() {
+                        Some(line) => line.get(),
+                        None => 0,
+                    };
 
                     if let Some(file) = file {
                         file.lines.push(Line {
                             file: file.name.clone(),
-                            number: line.try_into().unwrap(),
+                            number: line as usize,
                             address: row.address().try_into().unwrap(),
                         });
                     }
@@ -266,11 +275,11 @@ impl From<gimli::Error> for Error {
     }
 }
 
-impl From<addr2line::gimli::Error> for Error {
-    fn from(err: addr2line::gimli::Error) -> Self {
-        Error::Addr2lineError(err)
-    }
-}
+// impl From<addr2line::gimli::Error> for Error {
+//     fn from(err: addr2line::gimli::Error) -> Self {
+//         Error::Addr2lineError(err)
+//     }
+// }
 
 impl From<io::Error> for Error {
     fn from(_: io::Error) -> Self {
@@ -327,16 +336,10 @@ fn get_attr_value<R: Reader>(
             dump_exprloc(w, unit.encoding(), data)?;
             Ok(DebugValue::Str(w.to_string()))
         }
-        gimli::AttributeValue::UnitRef(offset) => {
-            match offset.to_unit_section_offset(unit) {
-                UnitSectionOffset::DebugInfoOffset(goff) => {
-                    Ok(DebugValue::Size(goff.0))
-                }
-                UnitSectionOffset::DebugTypesOffset(goff) => {
-                    Ok(DebugValue::Size(goff.0))
-                }
-            }
-        }
+        gimli::AttributeValue::UnitRef(offset) => match offset.to_unit_section_offset(unit) {
+            UnitSectionOffset::DebugInfoOffset(goff) => Ok(DebugValue::Size(goff.0)),
+            UnitSectionOffset::DebugTypesOffset(goff) => Ok(DebugValue::Size(goff.0)),
+        },
         gimli::AttributeValue::DebugStrRef(offset) => {
             if let Ok(s) = dwarf.debug_str.get_str(offset) {
                 Ok(DebugValue::Str(format!("{}", s.to_string_lossy()?)))
@@ -356,9 +359,7 @@ fn get_attr_value<R: Reader>(
             dump_file_index(w, value, unit, dwarf)?;
             Ok(DebugValue::Str(w.to_string()))
         }
-        _ => {
-            Ok(DebugValue::NoVal)
-        }
+        _ => Ok(DebugValue::NoVal),
     }
 }
 
@@ -609,6 +610,9 @@ fn dump_op<R: Reader, W: Write>(
         | gimli::Operation::TLS
         | gimli::Operation::CallFrameCFA
         | gimli::Operation::StackValue => {}
+        gimli::Operation::WasmLocal { index } => todo!(),
+        gimli::Operation::WasmGlobal { index } => todo!(),
+        gimli::Operation::WasmStack { index } => todo!(),
     };
     Ok(())
 }

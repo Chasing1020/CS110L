@@ -1,5 +1,7 @@
 use crate::debugger_command::DebuggerCommand;
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::Inferior;
+use nix::sys::ptrace;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -8,13 +10,26 @@ pub struct Debugger {
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
+    debug_data: DwarfData,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
         // TODO (milestone 3): initialize the DwarfData
-
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
+        // debug_data.print();
+        
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
@@ -25,6 +40,7 @@ impl Debugger {
             history_path,
             readline,
             inferior: None,
+            debug_data,
         }
     }
 
@@ -38,15 +54,33 @@ impl Debugger {
                         self.inferior = Some(inferior);
 
                         let inferior = self.inferior.as_mut().unwrap();
-                        match inferior.continue_run(None).unwrap() {
-                            crate::inferior::Status::Stopped(signal, _) => {
-                                println!("Child stopped (signal {:?})", signal);
+                        match inferior.continue_run(None) {
+                            Ok(status) => match status {
+                                crate::inferior::Status::Stopped(signal, rip) => {
+                                    println!("Child stopped (signal {:?})", signal);
+                                    let _line = self.debug_data.get_line_from_addr(rip);
+                                    let _func = self.debug_data.get_function_from_addr(rip);
+                                    if _line.is_some() && _func.is_some() {
+                                        println!(
+                                            "Stopped at {} ({})",
+                                            _func.unwrap(),
+                                            _line.unwrap()
+                                        );
+                                    }
+                                }
+                                crate::inferior::Status::Exited(code) => {
+                                    println!("Child exited (status {})", code)
+                                }
+                                crate::inferior::Status::Signaled(_) => todo!(),
+                            },
+                            Err(e) => {
+                                let regs = ptrace::getregs(inferior.pid()).unwrap();
+
+                                let _line = self.debug_data.get_line_from_addr(regs.rip as usize);
+                                let _func =
+                                    self.debug_data.get_function_from_addr(regs.rip as usize);
                             }
-                            crate::inferior::Status::Exited(code) => {
-                                println!("Child exited (status {})", code)
-                            }
-                            crate::inferior::Status::Signaled(_) => todo!(),
-                        };
+                        }
                     } else {
                         println!("Error starting subprocess");
                     }
@@ -54,6 +88,13 @@ impl Debugger {
                 DebuggerCommand::Continue => {
                     let inferior = self.inferior.as_mut().unwrap();
                     inferior.continue_run(None).unwrap();
+                }
+                DebuggerCommand::BackTrace => {
+                    if let Some(inferior) = self.inferior.as_mut() {
+                        inferior.print_backtrace(&self.debug_data).unwrap();
+                    } else {
+                        println!("There isn't any child process")
+                    }
                 }
                 DebuggerCommand::Quit => {
                     self.kill_inferior_if_exists().unwrap();
@@ -63,11 +104,10 @@ impl Debugger {
         }
     }
 
-
     fn kill_inferior_if_exists(&mut self) -> Result<(), std::io::Error> {
         if let Some(inferior) = self.inferior.as_mut() {
             println!("Killing running inferior (pid {})", inferior.pid());
-            inferior.stop()?;
+            inferior.kill()?;
         }
         Ok(())
     }
