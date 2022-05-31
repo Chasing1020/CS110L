@@ -1,13 +1,18 @@
-SRCS = $(wildcard samples/*.c)
-PROGS = $(patsubst %.c,%,$(SRCS))
+CSRCS = $(wildcard samples/*.c)
+CPROGS = $(patsubst %.c,%,$(CSRCS))
+GOSRCS = $(wildcard samples/*.go)
+GOPROGS = $(patsubst %.go,%,$(GOSRCS))
 
-all: $(PROGS)
+all: $(CPROGS) $(GOPROGS)
 
 %: %.c
 	$(CC) $(CFLAGS) -O0 -g -no-pie -fno-omit-frame-pointer -o $@ $<
 
+%: %.go
+	CGO_LDFLAGS=-no-pie CGO_ENABLED=1 go build -ldflags=-w -gcflags=all="-N -l" -o $@ $<
+
 clean:
-	rm -f $(PROGS)
+	rm -f $(CPROGS) $(GOPROGS)
 
 run:
 	docker exec -it rust 'cd /usr/src/deet && cargo run'

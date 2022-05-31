@@ -29,7 +29,7 @@ impl Debugger {
             }
         };
         // debug_data.print();
-        
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
@@ -62,7 +62,7 @@ impl Debugger {
                                     let _func = self.debug_data.get_function_from_addr(rip);
                                     if _line.is_some() && _func.is_some() {
                                         println!(
-                                            "Stopped at {} ({})",
+                                            "Stopped at {} {}",
                                             _func.unwrap(),
                                             _line.unwrap()
                                         );
