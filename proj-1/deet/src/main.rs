@@ -10,7 +10,7 @@ use std::env;
 
 fn main() {
     let mut args: Vec<String> = env::args().collect();
-    args.push("samples/segfault".to_string());
+    args.push("samples/function_calls".to_string());
     if args.len() != 2 {
         println!("Usage: {} <target program>", args[0]);
         std::process::exit(1);

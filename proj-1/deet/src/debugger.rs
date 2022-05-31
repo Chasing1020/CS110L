@@ -11,6 +11,16 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
+    breakpoints: Vec<usize>,
+}
+
+fn parse_address(addr: &str) -> Option<usize> {
+    let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
+        &addr[2..]
+    } else {
+        &addr
+    };
+    usize::from_str_radix(addr_without_0x, 16).ok()
 }
 
 impl Debugger {
@@ -28,7 +38,7 @@ impl Debugger {
                 std::process::exit(1);
             }
         };
-        // debug_data.print();
+        debug_data.print();  // for debug
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -41,6 +51,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
+            breakpoints: vec![],
         }
     }
 
@@ -49,7 +60,7 @@ impl Debugger {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
                     self.kill_inferior_if_exists().unwrap();
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
 
@@ -99,6 +110,17 @@ impl Debugger {
                 DebuggerCommand::Quit => {
                     self.kill_inferior_if_exists().unwrap();
                     return;
+                }
+                DebuggerCommand::Breakpoint(addr) => {
+                    // let inferior = self.inferior.as_mut().unwrap();
+                    if addr.starts_with("*") {
+                        match parse_address(&addr[1..]) {
+                            Some(addr) => self.breakpoints.push(addr),
+                            None => {
+                                println!("Invalid breakpoints: {}", addr)
+                            }
+                        }
+                    }
                 }
             }
         }
