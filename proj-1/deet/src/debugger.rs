@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::debugger_command::DebuggerCommand;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::Inferior;
@@ -11,7 +13,7 @@ pub struct Debugger {
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
-    breakpoints: Vec<usize>,
+    breakpoints: HashMap<usize, u8>,
 }
 
 fn parse_address(addr: &str) -> Option<usize> {
@@ -38,7 +40,7 @@ impl Debugger {
                 std::process::exit(1);
             }
         };
-        debug_data.print();  // for debug
+        debug_data.print(); // for debug
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -51,7 +53,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
-            breakpoints: vec![],
+            breakpoints: HashMap::new(),
         }
     }
 
@@ -60,12 +62,14 @@ impl Debugger {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
                     self.kill_inferior_if_exists().unwrap();
-                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
+                    if let Some(inferior) =
+                        Inferior::new(&self.target, &args, &mut self.breakpoints)
+                    {
                         // Create the inferior
                         self.inferior = Some(inferior);
 
                         let inferior = self.inferior.as_mut().unwrap();
-                        match inferior.continue_run(None) {
+                        match inferior.continue_run(None, &mut self.breakpoints) {
                             Ok(status) => match status {
                                 crate::inferior::Status::Stopped(signal, rip) => {
                                     println!("Child stopped (signal {:?})", signal);
@@ -98,7 +102,33 @@ impl Debugger {
                 }
                 DebuggerCommand::Continue => {
                     let inferior = self.inferior.as_mut().unwrap();
-                    inferior.continue_run(None).unwrap();
+                    match inferior.continue_run(None, &mut self.breakpoints) {
+                        Ok(status) => match status {
+                            crate::inferior::Status::Stopped(signal, rip) => {
+                                println!("Child stopped (signal {:?})", signal);
+                                let _line = self.debug_data.get_line_from_addr(rip);
+                                let _func = self.debug_data.get_function_from_addr(rip);
+                                if _line.is_some() && _func.is_some() {
+                                    println!(
+                                        "Stopped at {} {}",
+                                        _func.unwrap(),
+                                        _line.unwrap()
+                                    );
+                                }
+                            }
+                            crate::inferior::Status::Exited(code) => {
+                                println!("Child exited (status {})", code)
+                            }
+                            crate::inferior::Status::Signaled(_) => todo!(),
+                        },
+                        Err(e) => {
+                            let regs = ptrace::getregs(inferior.pid()).unwrap();
+
+                            let _line = self.debug_data.get_line_from_addr(regs.rip as usize);
+                            let _func =
+                                self.debug_data.get_function_from_addr(regs.rip as usize);
+                        }
+                    }
                 }
                 DebuggerCommand::BackTrace => {
                     if let Some(inferior) = self.inferior.as_mut() {
@@ -115,9 +145,12 @@ impl Debugger {
                     // let inferior = self.inferior.as_mut().unwrap();
                     if addr.starts_with("*") {
                         match parse_address(&addr[1..]) {
-                            Some(addr) => self.breakpoints.push(addr),
+                            Some(addr) => {
+                                self.breakpoints.insert(addr, 0xcc);
+                                println!("Set beakpoint {} at {}", self.breakpoints.len(), addr)
+                            }
                             None => {
-                                println!("Invalid breakpoints: {}", addr)
+                                println!("Invalid breakpoints: {}", addr);
                             }
                         }
                     }
