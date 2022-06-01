@@ -67,68 +67,13 @@ impl Debugger {
                     {
                         // Create the inferior
                         self.inferior = Some(inferior);
-
-                        let inferior = self.inferior.as_mut().unwrap();
-                        match inferior.continue_run(None, &mut self.breakpoints) {
-                            Ok(status) => match status {
-                                crate::inferior::Status::Stopped(signal, rip) => {
-                                    println!("Child stopped (signal {:?})", signal);
-                                    let _line = self.debug_data.get_line_from_addr(rip);
-                                    let _func = self.debug_data.get_function_from_addr(rip);
-                                    if _line.is_some() && _func.is_some() {
-                                        println!(
-                                            "Stopped at {} {}",
-                                            _func.unwrap(),
-                                            _line.unwrap()
-                                        );
-                                    }
-                                }
-                                crate::inferior::Status::Exited(code) => {
-                                    println!("Child exited (status {})", code)
-                                }
-                                crate::inferior::Status::Signaled(_) => todo!(),
-                            },
-                            Err(e) => {
-                                let regs = ptrace::getregs(inferior.pid()).unwrap();
-
-                                let _line = self.debug_data.get_line_from_addr(regs.rip as usize);
-                                let _func =
-                                    self.debug_data.get_function_from_addr(regs.rip as usize);
-                            }
-                        }
+                        self.step_next();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Continue => {
-                    let inferior = self.inferior.as_mut().unwrap();
-                    match inferior.continue_run(None, &mut self.breakpoints) {
-                        Ok(status) => match status {
-                            crate::inferior::Status::Stopped(signal, rip) => {
-                                println!("Child stopped (signal {:?})", signal);
-                                let _line = self.debug_data.get_line_from_addr(rip);
-                                let _func = self.debug_data.get_function_from_addr(rip);
-                                if _line.is_some() && _func.is_some() {
-                                    println!(
-                                        "Stopped at {} {}",
-                                        _func.unwrap(),
-                                        _line.unwrap()
-                                    );
-                                }
-                            }
-                            crate::inferior::Status::Exited(code) => {
-                                println!("Child exited (status {})", code)
-                            }
-                            crate::inferior::Status::Signaled(_) => todo!(),
-                        },
-                        Err(e) => {
-                            let regs = ptrace::getregs(inferior.pid()).unwrap();
-
-                            let _line = self.debug_data.get_line_from_addr(regs.rip as usize);
-                            let _func =
-                                self.debug_data.get_function_from_addr(regs.rip as usize);
-                        }
-                    }
+                    self.step_next();
                 }
                 DebuggerCommand::BackTrace => {
                     if let Some(inferior) = self.inferior.as_mut() {
@@ -142,18 +87,7 @@ impl Debugger {
                     return;
                 }
                 DebuggerCommand::Breakpoint(addr) => {
-                    // let inferior = self.inferior.as_mut().unwrap();
-                    if addr.starts_with("*") {
-                        match parse_address(&addr[1..]) {
-                            Some(addr) => {
-                                self.breakpoints.insert(addr, 0xcc);
-                                println!("Set beakpoint {} at {}", self.breakpoints.len(), addr)
-                            }
-                            None => {
-                                println!("Invalid breakpoints: {}", addr);
-                            }
-                        }
-                    }
+                    self.add_breakpoint(addr);
                 }
             }
         }
@@ -205,6 +139,59 @@ impl Debugger {
                     }
                 }
             }
+        }
+    }
+
+    fn step_next(&mut self) {
+        let inferior = self.inferior.as_mut().unwrap();
+        match inferior.continue_run(None, &mut self.breakpoints) {
+            Ok(status) => match status {
+                crate::inferior::Status::Stopped(signal, rip) => {
+                    println!("Child stopped (signal {:?})", signal);
+                    let _line = self.debug_data.get_line_from_addr(rip);
+                    let _func = self.debug_data.get_function_from_addr(rip);
+                    if _line.is_some() && _func.is_some() {
+                        println!("Stopped at {} {}", _func.unwrap(), _line.unwrap());
+                    }
+                }
+                crate::inferior::Status::Exited(code) => {
+                    println!("Child exited (status {})", code)
+                }
+                crate::inferior::Status::Signaled(_) => todo!(),
+            },
+            Err(e) => {
+                let regs = ptrace::getregs(inferior.pid()).unwrap();
+                let _line = self.debug_data.get_line_from_addr(regs.rip as usize);
+                let _func = self.debug_data.get_function_from_addr(regs.rip as usize);
+            }
+        }
+    }
+
+    fn add_breakpoint(&mut self, location: String) {
+        if self.inferior.is_none() {
+            println!("Please start inferior");
+            return;
+        }
+
+        if let Ok(line) = location.parse::<usize>() {
+            let addr = self.debug_data.get_addr_for_line(None, line).unwrap();
+            self.breakpoints.insert(addr, 0xcc);
+            println!("Set beakpoint {} at {}", self.breakpoints.len(), addr)
+        } else if location.starts_with("*") {
+            match parse_address(&location[1..]) {
+                Some(addr) => {
+                    self.breakpoints.insert(addr, 0xcc);
+                    println!("Set beakpoint {} at {}", self.breakpoints.len(), addr)
+                }
+                None => {
+                    println!("Invalid breakpoints: {}", location);
+                }
+            }
+        } else if let Some(addr) = self.debug_data.get_addr_for_function(None, &location) {
+            self.breakpoints.insert(addr, 0xcc);
+            println!("Set beakpoint {} at {}", self.breakpoints.len(), addr)
+        } else {
+            println!("Usage: b|break|breakpoint *address|line|func");
         }
     }
 }
