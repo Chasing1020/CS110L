@@ -25,7 +25,14 @@ const WORDS_PATH: &str = "words.txt";
 fn pick_a_random_word() -> String {
     let file_string = fs::read_to_string(WORDS_PATH).expect("Unable to read file.");
     let words: Vec<&str> = file_string.split('\n').collect();
-    String::from(words[rand::thread_rng().gen_range(0..words.len())].trim())
+    let mut valid_words: Vec<&str> = vec![];
+    for i in &words {
+        if i.len() != 0 {
+            valid_words.push(i);
+        }
+    }
+    assert_ne!(valid_words.len(), 0);
+    String::from(valid_words[rand::thread_rng().gen_range(0..valid_words.len())].trim())
 }
 
 fn vec_to_string(v: &Vec<char>) -> String {
